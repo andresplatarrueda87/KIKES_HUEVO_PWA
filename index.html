@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>KIKES HUEVO CAUCA | Producción Drive &amp; SQLite</title>
+
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#248a20">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Kikes Cauca">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="icon" type="image/x-icon" href="favicon.ico">
+  <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
+  <link rel="icon" type="image/png" sizes="64x64" href="favicon.png">
+
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <script src="lib/sql-wasm.js"></script>
+  <script src="lib/chart.umd.min.js"></script>
+  <script src="lib/xlsx.full.min.js"></script>
+  <script src="lib/mqtt.min.js"></script>
+
+  <link rel="stylesheet" href="style.css?v=2">
+</head>
+<body>
+
+  <!-- 1. ENCABEZADO -->
+  <header class="app-header">
+    <div class="header-brand">
+      <img src="Kikes_image_1.png" alt="KIKES" class="brand-logo">
+      <div class="header-titles">
+        <h1>Producción Huevos <span class="brand-tag">SECCIONAL CAUCA</span></h1>
+        <p>Consolidado Google Drive + SQLite: ALKA 1 (1–20), ALKA 2 (21–30) y ALKA PALMAS (1–8)</p>
+      </div>
+    </div>
+
+    <div class="header-actions">
+      <div class="mqtt-ctrl-pill" title="Estado de actualización en tiempo real por MQTT (solo día actual)">
+        <span class="mqtt-dot connecting" id="mqttDot"></span>
+        <span class="mqtt-lbl" id="lblMqttEstado">MQTT: Conectando...</span>
+        <div class="mqtt-seg" id="hoySourceSeg" role="group" aria-label="Fuente del día actual">
+          <button type="button" class="mseg-btn active" data-source="auto" title="Usa MQTT si llegó dato hoy; si falta usa SQLite/Drive">Auto</button>
+          <button type="button" class="mseg-btn" data-source="mqtt" title="Mostrar hoy solo desde MQTT">MQTT</button>
+          <button type="button" class="mseg-btn" data-source="drive" title="Mostrar hoy solo desde Archivos SQLite/Drive">Archivos</button>
+        </div>
+      </div>
+
+      <div class="status-pill" id="syncStatusPill">
+        <span class="status-dot"></span>
+        <span id="syncStatusText">Listo</span>
+      </div>
+
+      <button class="btn-report" id="btnSyncDrive">
+        <span>&#128260;</span>
+        <span>Sincronizar Cauca</span>
+      </button>
+
+      <div class="user-pill">
+        <span class="user-avatar" id="userAvatar">K</span>
+        <div class="user-meta">
+          <div class="user-email-lbl" id="lblUserEmail">Sin sesión</div>
+          <div class="user-role-badge" id="lblSqliteBadge">SQLite: 0 días</div>
+        </div>
+        <button id="btnAuthAction" class="btn-filter btn-sm">Salir</button>
+      </div>
+    </div>
+  </header>
+
+  <!-- 2. RIBBON KPI SECCIONAL CAUCA -->
+  <section class="kpi-ribbon">
+    <div class="kpi-card" id="kpiCardHoy">
+      <div class="kpi-icon kpi-egg-wrap"><img src="egg.svg" alt="Huevo" class="kpi-egg"></div>
+      <div class="kpi-content">
+        <div class="kpi-title-row">
+          <span class="kpi-title" id="kpiHoyTitle">TOTAL CAUCA HOY</span>
+          <span class="kpi-src-tag hidden" id="kpiHoySrcTag">MQTT</span>
+        </div>
+        <span class="kpi-value" id="kpiTotalHoy">0 <span>Und</span></span>
+        <span class="kpi-sub" id="kpiHoyBreakdown">ALKA 1: 0 · ALKA 2: 0 · PALMAS: 0</span>
+      </div>
+    </div>
+
+    <div class="kpi-card">
+      <div class="kpi-icon">&#128202;</div>
+      <div class="kpi-content">
+        <span class="kpi-title">TOTAL PERÍODO FILTRADO</span>
+        <span class="kpi-value" id="kpiTotalPeriodo">0 <span>Und</span></span>
+        <span class="kpi-sub" id="kpiPeriodoSub">0 días · Todas las plantas</span>
+      </div>
+    </div>
+
+    <div class="kpi-card">
+      <div class="kpi-icon">&#127968;</div>
+      <div class="kpi-content">
+        <span class="kpi-title">GALPONES ACTIVOS HOY</span>
+        <span class="kpi-value" id="kpiGalponesActivos">0 / 38</span>
+        <span class="kpi-sub" id="kpiPromedioDiaSub">Prom. diario: 0 Und</span>
+      </div>
+    </div>
+
+    <div class="kpi-card">
+      <div class="kpi-icon">&#128451;</div>
+      <div class="kpi-content">
+        <span class="kpi-title">CACHÉ SQLITE LOCAL</span>
+        <span class="kpi-value" id="kpiSqliteDias">0 <span>Reg</span></span>
+        <span class="kpi-sub" id="kpiSqliteSub">0 cerrados · 0 KB</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- 3. SELECTOR DE PLANTA Y FILTROS -->
+  <section class="filter-toolbar">
+    <div class="plant-pills" id="plantPills">
+      <button class="plant-pill active" data-planta="TODAS">Todo Cauca (38)</button>
+      <button class="plant-pill" data-planta="ALKA1">ALKA 1 (1–20)</button>
+      <button class="plant-pill" data-planta="ALKA2">ALKA 2 (21–30)</button>
+      <button class="plant-pill" data-planta="PALMAS">ALKA PALMAS (1–8)</button>
+    </div>
+
+    <div class="date-range-box">
+      <input type="date" id="filtroFechaInicio" title="Fecha inicio">
+      <span>&rarr;</span>
+      <input type="date" id="filtroFechaFin" title="Fecha fin">
+      <select id="filtroGalpon" title="Filtrar por Galpón"></select>
+    </div>
+
+    <div class="quick-buttons">
+      <button class="btn-filter" data-preset="hoy">Hoy</button>
+      <button class="btn-filter" data-preset="ayer">Ayer</button>
+      <button class="btn-filter active-btn" data-preset="7d">7 Días</button>
+      <button class="btn-filter" data-preset="mes">Este Mes</button>
+      <button class="btn-filter" data-preset="todo">Todo SQLite</button>
+      <button class="btn-filter btn-apply" id="btnAplicarFiltro">Aplicar</button>
+    </div>
+  </section>
+
+  <!-- 4. PESTAÑAS -->
+  <nav class="tabs-container">
+    <button class="tab-btn active-tab" data-tab="tabEnVivo">&#128065; Monitoreo Hoy (Cauca)</button>
+    <button class="tab-btn" data-tab="tabConsolidado">&#128202; Consolidado Diario</button>
+    <button class="tab-btn" data-tab="tabPorGalpon">&#127968; Detalle por Planta y Galpón</button>
+    <button class="tab-btn" data-tab="tabSqlite">&#128190; Base de Datos SQLite</button>
+    <button class="tab-btn" data-tab="tabAjustes">&#9881;&#65039; Ajustes</button>
+  </nav>
+
+  <!-- 5. SUB-BARRA DE EXPORTACIÓN -->
+  <section class="actions-subbar">
+    <div class="export-group">
+      <button class="btn-export" id="btnExportHoyCsv">&#128196; Plano Hoy (.csv)</button>
+      <button class="btn-export btn-excel" id="btnExportHoyExcel">&#128202; Excel Hoy (.xlsx)</button>
+      <span class="export-divider"></span>
+      <button class="btn-export" id="btnExportDispCsv">&#128196; Plano Disponibles (.csv)</button>
+      <button class="btn-export btn-excel" id="btnExportDispExcel">&#128202; Excel Disponibles (.xlsx)</button>
+
+      <div class="csv-sep-box">
+        <label for="selectSeparadorCsv">Sep:</label>
+        <select id="selectSeparadorCsv">
+          <option value=",">, (Coma)</option>
+          <option value=";">; (Punto y coma)</option>
+          <option value="&#9;">Tab (\t)</option>
+          <option value="|">| (Pipe)</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="group-options">
+      <label for="selectAgrupar">Agrupar consolidado:</label>
+      <select id="selectAgrupar">
+        <option value="dia" selected>&#128197; Por Día (Total Cauca)</option>
+        <option value="dia_planta">&#127981; Día y Planta</option>
+        <option value="dia_galpon">&#127968; Día, Planta y Galpón</option>
+        <option value="semana">&#128198; Semana</option>
+        <option value="mes">&#128197; Mes</option>
+      </select>
+    </div>
+  </section>
+
+  <!-- 6. CONTENIDO PRINCIPAL -->
+  <main id="mainContainer">
+
+    <!-- TAB 1: MONITOREO HOY -->
+    <section id="tabEnVivo" class="tab-content">
+      <div class="panel-card">
+        <div class="panel-header">
+          <div>
+            <h2>Resumen por Planta &mdash; Seccional Cauca</h2>
+            <span class="panel-sub" id="lblMonitorFecha">Mostrando fecha: --</span>
+          </div>
+          <div class="panel-controls">
+            <label for="selectFechaMonitor">Ver fecha:</label>
+            <select id="selectFechaMonitor" class="inline-select"></select>
+          </div>
+        </div>
+
+        <div class="plants-summary-grid" id="gridResumenPlantas"></div>
+
+        <div id="contenedorGalponesPorPlanta"></div>
+
+        <div class="live-total-bar">
+          <div class="live-total-item">
+            <span class="live-total-label">Total Día Seleccionado:</span>
+            <span class="live-total-value" id="totalDiaSeleccionado">0</span>
+          </div>
+          <div class="live-total-item">
+            <span class="live-total-label">Total Últimos 7 Días (Cauca):</span>
+            <span class="live-total-value" id="totalUltimos7Dias">0</span>
+          </div>
+          <div class="live-total-item">
+            <span class="live-total-label">Total Mes Actual (Cauca):</span>
+            <span class="live-total-value" id="totalMesActual">0</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 2: CONSOLIDADO DIARIO -->
+    <section id="tabConsolidado" class="tab-content hidden">
+      <div class="chart-box" id="boxGrafica">
+        <div class="chart-header">
+          <div class="chart-title">
+            &#128202; Consolidado Seccional Cauca (<span id="lblPeriodosAnalizados">0</span> períodos)
+          </div>
+          <button class="btn-filter btn-sm" id="btnToggleGrafica">&#128065; Ocultar Gráfica</button>
+        </div>
+        <div class="chart-wrapper">
+          <canvas id="canvasChartConsolidado"></canvas>
+        </div>
+      </div>
+
+      <div class="table-box">
+        <table class="kikes-table" id="tablaConsolidado">
+          <thead id="theadConsolidado"></thead>
+          <tbody id="tbodyConsolidado"></tbody>
+        </table>
+        <div class="table-footer">
+          <span id="footerTotalRegistros">Total registros: 0</span>
+          <span id="footerTotalHuevos">Total: 0 Huevos</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 3: DETALLE POR PLANTA Y GALPÓN -->
+    <section id="tabPorGalpon" class="tab-content hidden">
+      <div class="table-box">
+        <table class="kikes-table">
+          <thead>
+            <tr>
+              <th>Planta</th>
+              <th>Galpón</th>
+              <th>Código</th>
+              <th class="text-right">Total Período</th>
+              <th class="text-right">Promedio / Día</th>
+              <th class="text-right">Días</th>
+              <th class="text-right">Mejor Día</th>
+              <th class="text-right">% en Cauca</th>
+            </tr>
+          </thead>
+          <tbody id="tbodyPorGalpon"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- TAB 4: BASE DE DATOS SQLITE -->
+    <section id="tabSqlite" class="tab-content hidden">
+      <div class="panel-card">
+        <div class="panel-header">
+          <div>
+            <h2>Control de Importación SQLite (3 Plantas Cauca)</h2>
+            <span class="panel-sub">Los días anteriores marcados como <strong>Cerrada</strong> en SQLite se omiten automáticamente al sincronizar con Google Drive.</span>
+          </div>
+          <div class="panel-controls">
+            <button class="btn-filter" id="btnForzarReimportar">&#128260; Forzar Reimportación Total</button>
+            <button class="btn-filter" id="btnDescargarSqlite">&#11015;&#65039; Descargar .sqlite</button>
+            <button class="btn-filter btn-danger-outline" id="btnLimpiarSqlite">&#128465;&#65039; Vaciar SQLite</button>
+          </div>
+        </div>
+
+        <div class="sqlite-summary-grid" id="sqliteSummaryGrid"></div>
+
+        <div class="table-box" style="margin-top: 12px;">
+          <table class="kikes-table">
+            <thead>
+              <tr>
+                <th>Planta</th>
+                <th>Fecha</th>
+                <th>Archivo Drive</th>
+                <th>Estado Importación</th>
+                <th class="text-right">Total Planta</th>
+                <th>Modificado en Drive</th>
+                <th>Importado en SQLite</th>
+                <th>Acción</th>
+              </tr>
+            </thead>
+            <tbody id="tbodySqliteFechas"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 5: AJUSTES -->
+    <section id="tabAjustes" class="tab-content hidden">
+      <div class="settings-grid">
+        <div class="panel-card">
+          <h3>&#128100; Cuenta Google Vinculada</h3>
+          <p class="panel-sub" style="margin: 6px 0 14px;">Conecta tu cuenta Google con acceso a las 3 carpetas de Drive de Seccional Cauca.</p>
+          <div class="account-box">
+            <div>
+              <strong id="settingsUserEmail">No autenticado</strong>
+              <div class="panel-sub" id="settingsLastSync">Última sincronización: --</div>
+            </div>
+            <button class="btn-filter btn-danger-outline" id="btnLogoutGoogle">Cerrar Sesión</button>
+          </div>
+        </div>
+
+        <div class="panel-card">
+          <h3>&#128193; Carpetas Google Drive por Planta</h3>
+          <div class="form-group">
+            <label for="inputFolderAlka1">ALKA 1 (Galpones 1–20)</label>
+            <input type="text" id="inputFolderAlka1">
+          </div>
+          <div class="form-group">
+            <label for="inputFolderAlka2">ALKA 2 (Galpones 21–30)</label>
+            <input type="text" id="inputFolderAlka2">
+          </div>
+          <div class="form-group">
+            <label for="inputFolderPalmas">ALKA PALMAS (Galpones 1–8)</label>
+            <input type="text" id="inputFolderPalmas">
+          </div>
+          <div class="form-group">
+            <label for="inputAutoRefreshMin">Auto-sincronización (minutos, 0 = manual)</label>
+            <input type="number" id="inputAutoRefreshMin" min="0" max="120" value="5">
+          </div>
+          <button class="btn-report" id="btnGuardarAjustes">Guardar Ajustes</button>
+        </div>
+
+        <div class="panel-card">
+          <div class="mqtt-card-head">
+            <h3>&#128225; Actualización en Tiempo Real (MQTT · Solo Hoy)</h3>
+            <label class="mqtt-toggle">
+              <input type="checkbox" id="chkMqttEnabled" checked>
+              <span>Activar MQTT</span>
+            </label>
+          </div>
+          <p class="panel-sub" style="margin: 4px 0 10px;">
+            Cuando llegan conteos por MQTT del día actual, el Totalizador del Header y las tarjetas de plantas muestran el valor en vivo con destello de actualización. Días anteriores siguen saliendo de SQLite/Drive.
+          </p>
+          <div class="form-group">
+            <label for="inputMqttBroker">Broker WebSocket (WSS)</label>
+            <input type="text" id="inputMqttBroker" placeholder="wss://broker.emqx.io:8084/mqtt">
+          </div>
+          <div class="mqtt-topics-grid">
+            <div class="form-group">
+              <label for="inputMqttTopicPx1">ALKA 1 · PX1 (Galpones 1–10)</label>
+              <input type="text" id="inputMqttTopicPx1">
+            </div>
+            <div class="form-group">
+              <label for="inputMqttTopicPx2">ALKA 1 · PX2 (Galpones 11–20)</label>
+              <input type="text" id="inputMqttTopicPx2">
+            </div>
+            <div class="form-group">
+              <label for="inputMqttTopicPx3">ALKA 2 · PX3 (Galpones 21–30)</label>
+              <input type="text" id="inputMqttTopicPx3">
+            </div>
+            <div class="form-group">
+              <label for="inputMqttTopicPalmas">ALKA PALMAS · PXPALMAS (Galpones 1–8)</label>
+              <input type="text" id="inputMqttTopicPalmas">
+            </div>
+          </div>
+          <button class="btn-report" id="btnGuardarMqtt">Guardar y Reconectar MQTT</button>
+          <div class="mqtt-debug-list" id="mqttDebugList"></div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- MODAL LOGIN -->
+  <div id="loginOverlay" class="login-overlay hidden">
+    <div class="login-modal">
+      <img src="Kikes_image_1.png" alt="KIKES" class="login-logo">
+      <h2>KIKES HUEVO · CAUCA</h2>
+      <p class="login-subtitle">ALKA 1 · ALKA 2 · ALKA PALMAS</p>
+      <p class="login-desc">Inicia sesión con tu cuenta de Google para consolidar la producción de toda la Seccional Cauca en SQLite.</p>
+      <button id="btnGoogleLogin" class="btn-google-login">
+        <svg viewBox="0 0 24 24" width="20" height="20">
+          <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+          <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+          <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
+          <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
+        </svg>
+        <span>Iniciar Sesión con Google</span>
+      </button>
+    </div>
+  </div>
+
+  <div id="toastContainer" class="toast-container"></div>
+
+  <script src="sqlite-store.js?v=2"></script>
+  <script src="app.js?v=2"></script>
+</body>
+</html>

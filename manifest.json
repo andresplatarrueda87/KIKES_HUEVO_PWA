@@ -1,0 +1,17 @@
+{
+  "name": "KIKES HUEVO CAUCA | Drive + SQLite",
+  "short_name": "Kikes Cauca",
+  "description": "Consolidado de Producción Huevos Seccional Cauca (ALKA 1, ALKA 2, ALKA PALMAS)",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#f4f6f9",
+  "theme_color": "#248a20",
+  "orientation": "any",
+  "icons": [
+    { "src": "favicon.ico", "sizes": "256x256 128x128 64x64 48x48 32x32 16x16", "type": "image/x-icon", "purpose": "any" },
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
