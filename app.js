@@ -1362,9 +1362,6 @@ function buildPlantSectionRender(plant, section, byNum, totalPlanta, recentCutof
           ${badgeHtml}
         </div>
         <div class="galpon-value">${val.toLocaleString()}</div>
-        <div class="galpon-bar-track">
-          <div class="galpon-bar-fill" style="width:${Math.min(100, Number(pct))}%;background:${plant.color};"></div>
-        </div>
         <div class="galpon-share ${gSrc === 'MQTT' ? 'is-mqtt-txt' : ''}">${escapeHtml(footerTxt)}</div>
       </div>
     `);
