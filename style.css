@@ -177,6 +177,7 @@ body {
 .plant-pill {
   background: #f1f5f9; border: 1px solid #cbd5e1; color: #334155;
   padding: 6px 12px; border-radius: 999px; font-size: 12px; font-weight: 700; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 6px;
 }
 .plant-pill.active { background: #0f172a; color: #fff; border-color: #0f172a; }
 
@@ -243,7 +244,20 @@ body {
   transform-origin: left center;
 }
 .ps-top { display: flex; justify-content: space-between; align-items: center; gap: 6px; margin-bottom: 6px; }
+.ps-name-wrap { display: inline-flex; align-items: center; gap: 7px; }
 .ps-badges { display: inline-flex; align-items: center; gap: 5px; }
+
+.plant-led {
+  width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex-shrink: 0;
+  background: #94a3b8; border: 1.5px solid rgba(15, 23, 42, 0.16);
+  transition: background-color 0.25s ease, box-shadow 0.25s ease;
+}
+.plant-led.led-green { background: #22c55e; box-shadow: 0 0 6px rgba(34, 197, 94, 0.85); }
+.plant-led.led-yellow { background: #facc15; box-shadow: 0 0 6px rgba(250, 204, 21, 0.9); }
+.plant-led.led-red { background: #ef4444; box-shadow: 0 0 6px rgba(239, 68, 68, 0.85); }
+.kpi-card .plant-led, .plant-pill.active .plant-led { border-color: rgba(255,255,255,0.88); }
+.kpi-card .plant-led.led-green { background: #4ade80; box-shadow: 0 0 7px rgba(74, 222, 128, 0.95); }
+.kpi-plant-part { display: inline-flex; align-items: center; gap: 4px; }
 .ps-name { font-weight: 800; font-size: 14px; }
 .ps-range { font-size: 11px; font-weight: 700; color: var(--text-muted); background: #e2e8f0; padding: 2px 7px; border-radius: 999px; }
 .ps-val-row { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }

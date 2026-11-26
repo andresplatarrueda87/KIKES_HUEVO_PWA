@@ -173,6 +173,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   restartAutoRefreshTimer();
+  setInterval(updateAllPlantFreshnessLeds, 30000);
 });
 
 function initServiceWorker() {
@@ -351,6 +352,7 @@ function loadMqttCacheIntoMemory() {
           raw: slot.raw || '',
           receivedAt: slot.receivedAt || null,
           isRetained: !!slot.isRetained,
+          payloadFormat: slot.payloadFormat || 'raw',
           topic: slot.topic || State.mqttCfg.topics[def.key]
         });
       }
@@ -372,6 +374,7 @@ function persistMqttCache() {
         raw: slot.raw,
         receivedAt: slot.receivedAt,
         isRetained: !!slot.isRetained,
+        payloadFormat: slot.payloadFormat || 'raw',
         topic: slot.topic
       };
     }
@@ -459,25 +462,35 @@ function connectMqttClient() {
   });
 }
 
-function extractRawStringFromPayload(payloadStr) {
+function parseMqttPayload(payloadStr) {
   const s = String(payloadStr || '').trim();
-  if (!s) return '';
+  if (!s) return { raw: '', timestampIso: null, format: 'empty' };
   if (s.startsWith('{')) {
     try {
       const obj = JSON.parse(s);
       if (obj && obj.value !== undefined && obj.value !== null) {
-        return String(obj.value).trim();
+        const rawVal = String(obj.value).trim();
+        const rawTs = obj.timestamp ?? obj.ts ?? obj.fechaHora ?? null;
+        let timestampIso = null;
+        if (rawTs) {
+          const parsedMs = Date.parse(String(rawTs));
+          if (Number.isFinite(parsedMs) && parsedMs > 0) {
+            timestampIso = new Date(parsedMs).toISOString();
+          }
+        }
+        return { raw: rawVal, timestampIso, format: 'json' };
       }
     } catch { }
   }
-  return s;
+  return { raw: s, timestampIso: null, format: 'raw' };
 }
 
 function handleIncomingMqttMessage(topic, payloadStr, isRetained = false) {
   const matchingDefs = MQTT_TOPIC_DEFS.filter((d) => State.mqttCfg.topics[d.key] === topic);
   if (matchingDefs.length === 0) return;
 
-  const raw = extractRawStringFromPayload(payloadStr);
+  const parsedPayload = parseMqttPayload(payloadStr);
+  const raw = parsedPayload.raw;
   if (!raw) return;
 
   const parts = raw.split(/[|,;]/).map((p) => p.trim());
@@ -485,14 +498,14 @@ function handleIncomingMqttMessage(topic, payloadStr, isRetained = false) {
 
   const todayStr = getLocalDateStr();
   const nowIso = new Date().toISOString();
-  let updated = false;
+  const effectiveTs = parsedPayload.timestampIso || nowIso;
+  let anyChanged = false;
 
   for (const def of matchingDefs) {
     const prevSlot = State.mqttDataByKey.get(def.key);
     const sameDayPrev = prevSlot && prevSlot.fecha === todayStr ? prevSlot : null;
     const expectedCount = def.maxGalpon - def.minGalpon + 1;
     const valuesByNum = {};
-    const updatedAtByNum = {};
     let total = 0;
 
     for (let i = 0; i < expectedCount; i++) {
@@ -501,15 +514,31 @@ function handleIncomingMqttMessage(topic, payloadStr, isRetained = false) {
       const val = parseInt(cell, 10) || 0;
       valuesByNum[galponNum] = val;
       total += val;
+    }
 
+    const sameAllValues = !!sameDayPrev && (
+      sameDayPrev.raw === raw ||
+      Array.from({ length: expectedCount }, (_, idx) => def.minGalpon + idx)
+        .every((n) => Number(sameDayPrev.valuesByNum?.[n] ?? NaN) === Number(valuesByNum[n]))
+    );
+
+    if (sameAllValues) {
+      // El valor completo no cambió: conservar intactas todas las horas (tópico, galpones y LEDs)
+      continue;
+    }
+
+    const updatedAtByNum = {};
+    for (let i = 0; i < expectedCount; i++) {
+      const galponNum = def.minGalpon + i;
+      const val = valuesByNum[galponNum];
       const prevVal = sameDayPrev?.valuesByNum?.[galponNum];
       if (!sameDayPrev || prevVal !== val) {
-        updatedAtByNum[galponNum] = nowIso;
+        updatedAtByNum[galponNum] = effectiveTs;
         if (sameDayPrev) {
           State.recentMqttChanges.set(`${def.plantId}|${galponNum}`, Date.now());
         }
       } else {
-        updatedAtByNum[galponNum] = sameDayPrev.updatedAtByNum?.[galponNum] || nowIso;
+        updatedAtByNum[galponNum] = sameDayPrev.updatedAtByNum?.[galponNum] || sameDayPrev.receivedAt || effectiveTs;
       }
     }
 
@@ -519,15 +548,16 @@ function handleIncomingMqttMessage(topic, payloadStr, isRetained = false) {
       updatedAtByNum,
       total,
       raw,
-      receivedAt: nowIso,
+      receivedAt: effectiveTs,
       isRetained,
+      payloadFormat: parsedPayload.format,
       topic
     });
     State.lastMqttTopicLabel = def.label;
-    updated = true;
+    anyChanged = true;
   }
 
-  if (updated) {
+  if (anyChanged) {
     persistMqttCache();
     flashMqttDot();
     updateMqttStatusLabel();
@@ -550,6 +580,7 @@ function updateMqttStatusLabel() {
   const todayStr = getLocalDateStr();
   let receivedCount = 0;
   let latestIso = null;
+  let latestLabel = '';
 
   for (const def of MQTT_TOPIC_DEFS) {
     const slot = State.mqttDataByKey.get(def.key);
@@ -557,13 +588,15 @@ function updateMqttStatusLabel() {
       receivedCount++;
       if (slot.receivedAt && (!latestIso || slot.receivedAt > latestIso)) {
         latestIso = slot.receivedAt;
+        latestLabel = def.label;
       }
     }
   }
 
   if (mqttClient && mqttClient.connected) {
+    const labelName = latestLabel ? latestLabel.split('(')[0].trim() : (State.lastMqttTopicLabel ? State.lastMqttTopicLabel.split('(')[0].trim() : '');
     const timePart = latestIso
-      ? ` · ${State.lastMqttTopicLabel ? State.lastMqttTopicLabel.split('(')[0].trim() + ' ' : ''}${new Date(latestIso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+      ? ` · ${labelName ? labelName + ' ' : ''}${new Date(latestIso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
       : '';
     setMqttVisual('online', `MQTT: ${receivedCount}/${MQTT_TOPIC_DEFS.length}${timePart}`);
   } else if (State.mqttCfg.enabled) {
@@ -991,6 +1024,67 @@ function getEffectiveProductionRows(planta = 'TODAS', ini = null, fin = null, ga
   );
 }
 
+function getPlantFreshnessMeta(modifiedTime, nowMs = Date.now()) {
+  const tsMs = modifiedTime ? new Date(modifiedTime).getTime() : NaN;
+  if (!Number.isFinite(tsMs) || tsMs <= 0) {
+    return { cls: 'led-red', status: 'red', diffMin: null, title: 'Sin actualización registrada hoy (> 15 min)' };
+  }
+  const diffMin = Math.max(0, (nowMs - tsMs) / 60000);
+  const minsInt = Math.floor(diffMin);
+  const timeStr = new Date(tsMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+  if (diffMin > 15) {
+    return {
+      cls: 'led-red',
+      status: 'red',
+      diffMin,
+      title: `Última act.: ${timeStr} (hace ${minsInt} min · >15 min)`
+    };
+  }
+  if (diffMin >= 10) {
+    return {
+      cls: 'led-yellow',
+      status: 'yellow',
+      diffMin,
+      title: `Última act.: ${timeStr} (hace ${minsInt} min · 10-15 min)`
+    };
+  }
+  return {
+    cls: 'led-green',
+    status: 'green',
+    diffMin,
+    title: `Última act.: ${timeStr} (hace ${minsInt} min · al día)`
+  };
+}
+
+function applyLedElementState(el, freshness) {
+  if (!el) return;
+  el.classList.remove('led-green', 'led-yellow', 'led-red');
+  el.classList.add(freshness.cls);
+  el.title = freshness.title;
+}
+
+function updateAllPlantFreshnessLeds() {
+  const todayStr = getLocalDateStr();
+  const nowMs = Date.now();
+  const effAlka1 = getEffectivePlantDay('ALKA1', todayStr);
+  const effAlka2 = getEffectivePlantDay('ALKA2', todayStr);
+  const effPalmas = getEffectivePlantDay('PALMAS', todayStr);
+  const byPlant = {
+    ALKA1: { eff: effAlka1, pillId: 'ledPillAlka1' },
+    ALKA2: { eff: effAlka2, pillId: 'ledPillAlka2' },
+    PALMAS: { eff: effPalmas, pillId: 'ledPillPalmas' }
+  };
+
+  for (const [plantId, info] of Object.entries(byPlant)) {
+    const freshness = getPlantFreshnessMeta(info.eff?.latestMod, nowMs);
+    applyLedElementState(document.getElementById(info.pillId), freshness);
+    document.querySelectorAll(`[data-plant-led="${plantId}"]`).forEach((el) => {
+      applyLedElementState(el, freshness);
+    });
+  }
+}
+
 function updateKpiHeaderToday(todayStr, scope, hoyDisplay, diffHoyDisplay, hoySourceTag, tAlka1, tAlka2, tPalmas) {
   const cardEl = document.getElementById('kpiCardHoy');
   const totalEl = document.getElementById('kpiTotalHoy');
@@ -1013,9 +1107,9 @@ function updateKpiHeaderToday(todayStr, scope, hoyDisplay, diffHoyDisplay, hoySo
   }
 
   bdEl.innerHTML =
-    `<span class="kpi-plant-part" data-plant="ALKA1">ALKA 1: ${tAlka1.toLocaleString()}</span> · ` +
-    `<span class="kpi-plant-part" data-plant="ALKA2">ALKA 2: ${tAlka2.toLocaleString()}</span> · ` +
-    `<span class="kpi-plant-part" data-plant="PALMAS">PALMAS: ${tPalmas.toLocaleString()}</span>`;
+    `<span class="kpi-plant-part" data-plant="ALKA1"><span class="plant-led led-red" data-plant-led="ALKA1"></span>ALKA 1: ${tAlka1.toLocaleString()}</span> · ` +
+    `<span class="kpi-plant-part" data-plant="ALKA2"><span class="plant-led led-red" data-plant-led="ALKA2"></span>ALKA 2: ${tAlka2.toLocaleString()}</span> · ` +
+    `<span class="kpi-plant-part" data-plant="PALMAS"><span class="plant-led led-red" data-plant-led="PALMAS"></span>PALMAS: ${tPalmas.toLocaleString()}</span>`;
 
   const sameDate = MONITOR_LAST_SHOWN.kpiDate === todayStr;
   if (sameDate) {
@@ -1119,6 +1213,7 @@ function renderAllFromSqlite() {
 
   populateMonitorDateSelector(todayStr);
   renderMonitorView();
+  updateAllPlantFreshnessLeds();
   renderConsolidado();
   renderDetallePorGalpon();
   renderSqliteControlTab(sizeKb, stats);
@@ -1229,6 +1324,10 @@ function renderMonitorView() {
     const cap = p.maxGalpon - p.minGalpon + 1;
     const isSel = State.selectedPlant === p.id;
     const badge = getSourceBadgeMeta(eff.source);
+    const freshness = isToday ? getPlantFreshnessMeta(eff.latestMod) : null;
+    const ledCardHtml = freshness
+      ? `<span class="plant-led ${freshness.cls}" data-plant-led="${p.id}" title="${escapeHtml(freshness.title)}"></span>`
+      : '';
     const diffHtml = eff.diffVsDrive > 0 ? `<span class="ps-diff">(+${eff.diffVsDrive.toLocaleString()})</span>` : '';
     const timeStr = eff.latestMod
       ? new Date(eff.latestMod).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
@@ -1243,7 +1342,7 @@ function renderMonitorView() {
     return `
       <div class="plant-summary-card p-${p.id.toLowerCase()} ${eff.source === 'MQTT' || eff.source === 'MIX' ? 'is-mqtt' : ''} ${isSel ? 'selected' : ''}" data-planta="${p.id}" onclick="window.selectPlantFilter('${p.id}')">
         <div class="ps-top">
-          <span class="ps-name">${p.name}</span>
+          <span class="ps-name-wrap">${ledCardHtml}<span class="ps-name">${p.name}</span></span>
           <div class="ps-badges">
             <span class="src-pill ${badge.cls}">${badge.text}</span>
             <span class="ps-range">${p.rangeLabel}</span>
@@ -1275,6 +1374,10 @@ function renderMonitorView() {
     const totalP = eff.total;
     totalVisible += totalP;
     const badge = getSourceBadgeMeta(eff.source);
+    const secFreshness = isToday ? getPlantFreshnessMeta(eff.latestMod) : null;
+    const secLedHtml = secFreshness
+      ? `<span class="plant-led ${secFreshness.cls}" data-plant-led="${p.id}" title="${escapeHtml(secFreshness.title)}"></span>`
+      : '';
     const byNum = new Map((eff.rows || []).map((r) => [Number(r.numero_galpon), r]));
     const sections = p.sections || [{ key: p.id, title: p.subtitle, rangeLabel: p.rangeLabel, minGalpon: p.minGalpon, maxGalpon: p.maxGalpon }];
     const splitBySection = sections.length > 1;
@@ -1314,6 +1417,7 @@ function renderMonitorView() {
             <span class="panel-sub">(${p.rangeLabel} · ${p.subtitle})</span>
           </div>
           <div class="plant-section-right">
+            ${secLedHtml}
             <span class="src-pill ${badge.cls}">${badge.text}</span>
             <div><strong>${totalP.toLocaleString()}</strong> huevos</div>
             ${diffP > 0 ? `<span class="pb-diff">(+${diffP.toLocaleString()})</span>` : ''}
@@ -1599,7 +1703,29 @@ function initChart() {
     options: {
       responsive: true,
       maintainAspectRatio: false,
-      plugins: { legend: { position: 'top' } },
+      plugins: {
+        legend: { position: 'top' },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => {
+              const val = Number(ctx.parsed?.y || 0);
+              return ` ${ctx.dataset.label}: ${val.toLocaleString()} huevos`;
+            },
+            footer: (items) => {
+              if (!items || items.length === 0) return '';
+              const chart = items[0].chart;
+              const idx = items[0].dataIndex;
+              let total = 0;
+              chart.data.datasets.forEach((ds, i) => {
+                if (chart.isDatasetVisible(i)) {
+                  total += Number(ds.data[idx] || 0);
+                }
+              });
+              return `Total: ${total.toLocaleString()} huevos`;
+            }
+          }
+        }
+      },
       scales: {
         x: { stacked: true, grid: { display: false } },
         y: {
