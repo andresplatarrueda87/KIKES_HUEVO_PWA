@@ -132,11 +132,8 @@ const State = {
   mqttDataByKey: new Map(),
   recentMqttChanges: new Map(),
   lastMqttTopicLabel: null,
-  mqttState: 'offline',
-  initialDriveBaselineDone: false
+  mqttState: 'offline'
 };
-
-const PLANT_LED_SESSION = new Map();
 
 let gisTokenClient = null;
 let mqttClient = null;
@@ -156,7 +153,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   try {
     await CaucaSQLite.init();
-    absorbPendingPlantBaselines();
     renderAllFromSqlite();
   } catch (err) {
     console.error('Error SQLite:', err);
@@ -395,6 +391,9 @@ function setMqttVisual(state, label) {
     dot.classList.add(state);
   }
   if (lbl && label) lbl.textContent = label;
+  if (typeof updateAllPlantFreshnessLeds === 'function') {
+    updateAllPlantFreshnessLeds();
+  }
 }
 
 function flashMqttDot() {
@@ -571,12 +570,6 @@ function handleIncomingMqttMessage(topic, payloadStr, isRetained = false) {
   }
 
   if (anyChanged) {
-    const affectedIds = Array.from(changedPlantIds);
-    if (isRetained) {
-      absorbPendingPlantBaselines(affectedIds);
-    } else {
-      confirmLivePlantUpdates(affectedIds);
-    }
     persistMqttCache();
     flashMqttDot();
     updateMqttStatusLabel();
@@ -824,13 +817,6 @@ async function syncCaucaFromDrive(forceAll = false, targetPlant = null, targetDa
     }
 
     localStorage.setItem(CONFIG.STORAGE_KEYS.LAST_SYNC, new Date().toISOString());
-    const wasInitialDrive = !State.initialDriveBaselineDone;
-    State.initialDriveBaselineDone = true;
-    if (wasInitialDrive) {
-      absorbPendingPlantBaselines();
-    } else if (totalDownloaded > 0) {
-      confirmLivePlantUpdates(plantsToSync.map((p) => p.id));
-    }
     updateUserUI();
     renderAllFromSqlite();
 
@@ -989,8 +975,8 @@ function getEffectivePlantDay(plantaId, fecha, preloadedSqliteRows = null, impor
       if (picked.source === 'MQTT') mqttCount++;
       else if (picked.source === 'DRIVE') driveCount++;
 
-      if (picked.updatedAt && (!latestMod || picked.updatedAt > latestMod)) {
-        latestMod = picked.updatedAt;
+      if (picked.updatedAt) {
+        latestMod = pickLatestIso(latestMod, picked.updatedAt);
       }
 
       total += picked.val;
@@ -1050,119 +1036,62 @@ function getEffectiveProductionRows(planta = 'TODAS', ini = null, fin = null, ga
   );
 }
 
-function getPlantLedSignature(eff) {
-  const rows = eff?.rows || [];
-  if (rows.length === 0) return `0|${Number(eff?.total || 0)}`;
-  return rows.map((r) => `${r.numero_galpon}:${Number(r.total_produccion || 0)}`).join('|');
+function pickLatestIso(curIso, candIso) {
+  if (!candIso) return curIso;
+  const candMs = new Date(candIso).getTime();
+  if (!Number.isFinite(candMs) || candMs <= 0) return curIso;
+  if (!curIso) return candIso;
+  const curMs = new Date(curIso).getTime();
+  return !Number.isFinite(curMs) || candMs > curMs ? candIso : curIso;
 }
 
-function ensurePlantLedSession(plantId, todayStr, eff, nowMs = Date.now()) {
-  let rec = PLANT_LED_SESSION.get(plantId);
-  const sig = getPlantLedSignature(eff);
-  if (!rec || rec.fecha !== todayStr) {
-    rec = {
-      fecha: todayStr,
-      initialSig: sig,
-      lastSeenSig: sig,
-      waitStartedMs: nowMs,
-      confirmedChange: false,
-      lastConfirmedAtMs: null
-    };
-    PLANT_LED_SESSION.set(plantId, rec);
-  }
-  return rec;
-}
-
-function absorbPendingPlantBaselines(plantIds = null) {
-  const todayStr = getLocalDateStr();
-  const nowMs = Date.now();
-  const targets = plantIds || PLANTS.map((p) => p.id);
-  for (const plantId of targets) {
-    const eff = getEffectivePlantDay(plantId, todayStr);
-    const sig = getPlantLedSignature(eff);
-    const rec = ensurePlantLedSession(plantId, todayStr, eff, nowMs);
-    if (!rec.confirmedChange) {
-      rec.initialSig = sig;
-      rec.lastSeenSig = sig;
+function getMostRecentCardTimestampIso(eff) {
+  let latestIso = null;
+  for (const r of (eff?.rows || [])) {
+    if (r?.updatedAt) {
+      latestIso = pickLatestIso(latestIso, r.updatedAt);
     }
   }
+  return latestIso || eff?.latestMod || null;
 }
 
-function confirmLivePlantUpdates(plantIds = null) {
-  const todayStr = getLocalDateStr();
-  const nowMs = Date.now();
-  const targets = plantIds || PLANTS.map((p) => p.id);
-  for (const plantId of targets) {
-    const eff = getEffectivePlantDay(plantId, todayStr);
-    const sig = getPlantLedSignature(eff);
-    const rec = ensurePlantLedSession(plantId, todayStr, eff, nowMs);
-    if (!rec.confirmedChange) {
-      if (sig !== rec.initialSig) {
-        rec.confirmedChange = true;
-        rec.lastSeenSig = sig;
-        const tsMs = eff?.latestMod ? new Date(eff.latestMod).getTime() : NaN;
-        rec.lastConfirmedAtMs = (Number.isFinite(tsMs) && tsMs > 0 && tsMs <= nowMs + 60000)
-          ? Math.min(nowMs, tsMs)
-          : nowMs;
-      }
-    } else if (sig !== rec.lastSeenSig) {
-      rec.lastSeenSig = sig;
-      const tsMs = eff?.latestMod ? new Date(eff.latestMod).getTime() : NaN;
-      rec.lastConfirmedAtMs = (Number.isFinite(tsMs) && tsMs > 0 && tsMs <= nowMs + 60000)
-        ? Math.min(nowMs, tsMs)
-        : nowMs;
-    }
-  }
-}
-
-function getPlantFreshnessMeta(plantId, eff, nowMs = Date.now()) {
-  const todayStr = getLocalDateStr();
-  const rec = ensurePlantLedSession(plantId, todayStr, eff, nowMs);
-  const modMs = eff?.latestMod ? new Date(eff.latestMod).getTime() : NaN;
-  const hasValidMod = Number.isFinite(modMs) && modMs > 0;
-  const modStr = hasValidMod
-    ? new Date(modMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-    : null;
-
-  if (!rec.confirmedChange) {
-    const waitMin = Math.max(0, (nowMs - rec.waitStartedMs) / 60000);
-    const baseDetail = modStr ? ` · Última act.: ${modStr}` : '';
-    if (waitMin >= 10) {
+/**
+ * Calcula el estado del LED evaluando directamente una hora de actualización (card galpón, sección PX o planta):
+ * - Verde (< 5 min)
+ * - Amarillo (>= 5 min y < 10 min)
+ * - Rojo (>= 10 min o sin actualización tras conectar)
+ * - Verde-amarillo parpadeante (solo mientras conecta sin datos previos)
+ */
+function getTimestampFreshnessMeta(tsIso, nowMs = Date.now(), allowConnectingPending = true) {
+  const tsMs = tsIso ? new Date(tsIso).getTime() : NaN;
+  if (!Number.isFinite(tsMs) || tsMs <= 0) {
+    if (allowConnectingPending && State.mqttState === 'connecting') {
       return {
-        cls: 'led-red',
-        status: 'red',
-        diffMin: waitMin,
-        title: `Sin dato nuevo diferente al inicial (>=10 min)${baseDetail}`
-      };
-    }
-    if (waitMin >= 5) {
-      return {
-        cls: 'led-yellow',
-        status: 'yellow',
-        diffMin: waitMin,
-        title: `Sin dato nuevo diferente al inicial (${Math.floor(waitMin)} min · 5-10 min)${baseDetail}`
+        cls: 'led-pending',
+        status: 'pending',
+        tsIso: '',
+        diffMin: null,
+        title: 'Conectando / esperando datos...'
       };
     }
     return {
-      cls: 'led-pending',
-      status: 'pending',
-      diffMin: waitMin,
-      title: `Esperando dato nuevo diferente al inicial${baseDetail}`
+      cls: 'led-red',
+      status: 'red',
+      tsIso: '',
+      diffMin: null,
+      title: 'Sin actualización registrada hoy'
     };
   }
 
-  const refMs = rec.lastConfirmedAtMs || (hasValidMod ? modMs : NaN);
-  if (!Number.isFinite(refMs) || refMs <= 0) {
-    return { cls: 'led-red', status: 'red', diffMin: null, title: 'Sin actualización registrada hoy (>= 10 min)' };
-  }
-  const diffMin = Math.max(0, (nowMs - refMs) / 60000);
+  const diffMin = Math.max(0, (nowMs - tsMs) / 60000);
   const minsInt = Math.floor(diffMin);
-  const timeStr = modStr || new Date(refMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const timeStr = new Date(tsMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
   if (diffMin >= 10) {
     return {
       cls: 'led-red',
       status: 'red',
+      tsIso,
       diffMin,
       title: `Última act.: ${timeStr} (hace ${minsInt} min · >=10 min)`
     };
@@ -1171,6 +1100,7 @@ function getPlantFreshnessMeta(plantId, eff, nowMs = Date.now()) {
     return {
       cls: 'led-yellow',
       status: 'yellow',
+      tsIso,
       diffMin,
       title: `Última act.: ${timeStr} (hace ${minsInt} min · 5-10 min)`
     };
@@ -1178,9 +1108,15 @@ function getPlantFreshnessMeta(plantId, eff, nowMs = Date.now()) {
   return {
     cls: 'led-green',
     status: 'green',
+    tsIso,
     diffMin,
-    title: `Dato nuevo confirmado: ${timeStr} (hace ${minsInt} min · al día)`
+    title: `Última act.: ${timeStr} (hace ${minsInt} min · al día)`
   };
+}
+
+function getPlantFreshnessMeta(plantId, eff, nowMs = Date.now()) {
+  const latestCardIso = getMostRecentCardTimestampIso(eff);
+  return getTimestampFreshnessMeta(latestCardIso, nowMs, true);
 }
 
 function applyLedElementState(el, freshness) {
@@ -1188,6 +1124,9 @@ function applyLedElementState(el, freshness) {
   el.classList.remove('led-green', 'led-yellow', 'led-red', 'led-pending');
   el.classList.add(freshness.cls);
   el.title = freshness.title;
+  if (freshness.tsIso !== undefined && el.dataset && el.dataset.ledTs !== undefined) {
+    el.dataset.ledTs = freshness.tsIso || '';
+  }
 }
 
 function updateAllPlantFreshnessLeds() {
@@ -1209,6 +1148,11 @@ function updateAllPlantFreshnessLeds() {
       applyLedElementState(el, freshness);
     });
   }
+
+  document.querySelectorAll('[data-led-ts]').forEach((el) => {
+    const tsIso = el.dataset.ledTs || null;
+    applyLedElementState(el, getTimestampFreshnessMeta(tsIso, nowMs, true));
+  });
 }
 
 function updateKpiHeaderToday(todayStr, scope, hoyDisplay, diffHoyDisplay, hoySourceTag, tAlka1, tAlka2, tPalmas) {
@@ -1359,12 +1303,14 @@ function populateMonitorDateSelector(todayStr) {
   select.value = uniqueDates.includes(prev) ? prev : uniqueDates[0];
 }
 
-function buildPlantSectionRender(plant, section, byNum, totalPlanta, recentCutoff) {
+function buildPlantSectionRender(plant, section, byNum, totalPlanta, recentCutoff, isToday = true) {
   const cards = [];
   let sectionTotal = 0;
   let sectionDiff = 0;
   let mqttCount = 0;
   let driveCount = 0;
+  let latestUpdatedAt = null;
+  const nowMs = Date.now();
 
   for (let n = section.minGalpon; n <= section.maxGalpon; n++) {
     const r = byNum.get(n);
@@ -1379,11 +1325,19 @@ function buildPlantSectionRender(plant, section, byNum, totalPlanta, recentCutof
       driveCount++;
     }
 
+    if (r?.updatedAt) {
+      latestUpdatedAt = pickLatestIso(latestUpdatedAt, r.updatedAt);
+    }
+
     const pct = totalPlanta > 0 ? ((val / totalPlanta) * 100).toFixed(1) : '0.0';
     const recentTs = State.recentMqttChanges.get(`${plant.id}|${n}`) || 0;
     const isFlash = gSrc === 'MQTT' && recentTs > recentCutoff;
     const timeStr = r?.updatedAt
       ? new Date(r.updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      : '';
+    const gFreshness = isToday ? getTimestampFreshnessMeta(r?.updatedAt || null, nowMs, true) : null;
+    const miniLedHtml = gFreshness
+      ? `<span class="plant-led mini-led ${gFreshness.cls}" data-led-ts="${escapeHtml(gFreshness.tsIso || '')}" title="${escapeHtml(gFreshness.title)}"></span>`
       : '';
 
     const hasDiff = gSrc === 'MQTT' && r?.diffVsDrive > 0;
@@ -1401,7 +1355,10 @@ function buildPlantSectionRender(plant, section, byNum, totalPlanta, recentCutof
     cards.push(`
       <div class="galpon-card p-${plant.id} ${val === 0 ? 'sin-dato' : ''} ${gSrc === 'MQTT' ? 'is-mqtt' : ''} ${isFlash ? 'mqtt-flash' : ''}">
         <div class="galpon-card-top">
-          <span class="galpon-name">${escapeHtml(r?.nombre_galpon || `Galpón ${n}`)}</span>
+          <span class="galpon-name-wrap">
+            ${miniLedHtml}
+            <span class="galpon-name">${escapeHtml(r?.nombre_galpon || `Galpón ${n}`)}</span>
+          </span>
           ${badgeHtml}
         </div>
         <div class="galpon-value">${val.toLocaleString()}</div>
@@ -1418,7 +1375,7 @@ function buildPlantSectionRender(plant, section, byNum, totalPlanta, recentCutof
   else if (mqttCount > 0) sectionSource = 'MQTT';
   else if (driveCount > 0) sectionSource = 'DRIVE';
 
-  return { cardsHtml: cards.join(''), total: sectionTotal, diff: sectionDiff, source: sectionSource };
+  return { cardsHtml: cards.join(''), total: sectionTotal, diff: sectionDiff, source: sectionSource, latestUpdatedAt };
 }
 
 function renderMonitorView() {
@@ -1510,7 +1467,7 @@ function renderMonitorView() {
 
     const renderedSections = sections.map((sec) => ({
       sec,
-      rendered: buildPlantSectionRender(p, sec, byNum, totalP, recentCutoff)
+      rendered: buildPlantSectionRender(p, sec, byNum, totalP, recentCutoff, isToday)
     }));
     const diffP = renderedSections.reduce((s, item) => s + item.rendered.diff, 0);
 
@@ -1519,11 +1476,16 @@ function renderMonitorView() {
         return `<div class="galpones-grid">${rendered.cardsHtml}</div>`;
       }
       const secBadge = getSourceBadgeMeta(rendered.source);
+      const pxFreshness = isToday ? getTimestampFreshnessMeta(rendered.latestUpdatedAt, Date.now(), true) : null;
+      const pxLedHtml = pxFreshness
+        ? `<span class="plant-led sec-led ${pxFreshness.cls}" data-led-ts="${escapeHtml(pxFreshness.tsIso || '')}" title="${escapeHtml(pxFreshness.title)}"></span>`
+        : '';
       return `
         <div class="prod-subsection">
           <div class="prod-subhead">
             <span class="prod-sub-title">${escapeHtml(sec.title)} (${sec.rangeLabel})</span>
             <div class="prod-sub-right">
+              ${pxLedHtml}
               <span class="src-pill ${secBadge.cls}">${secBadge.text}</span>
               <span>${rendered.total.toLocaleString()} huevos</span>
               ${rendered.diff > 0 ? `<span class="pb-diff">(+${rendered.diff.toLocaleString()})</span>` : ''}
@@ -2017,7 +1979,6 @@ function initEventListeners() {
       State.hoySource = btn.dataset.source;
       localStorage.setItem(CONFIG.STORAGE_KEYS.HOY_SOURCE, State.hoySource);
       syncHoySourceButtons();
-      absorbPendingPlantBaselines();
       renderAllFromSqlite();
     });
   });
