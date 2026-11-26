@@ -177,7 +177,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   restartAutoRefreshTimer();
-  setInterval(updateAllPlantFreshnessLeds, 30000);
+  setInterval(updateAllPlantFreshnessLeds, 15000);
 });
 
 function initServiceWorker() {
@@ -1127,20 +1127,20 @@ function getPlantFreshnessMeta(plantId, eff, nowMs = Date.now()) {
   if (!rec.confirmedChange) {
     const waitMin = Math.max(0, (nowMs - rec.waitStartedMs) / 60000);
     const baseDetail = modStr ? ` · Última act.: ${modStr}` : '';
-    if (waitMin > 15) {
+    if (waitMin >= 10) {
       return {
         cls: 'led-red',
         status: 'red',
         diffMin: waitMin,
-        title: `Sin dato nuevo diferente al inicial (>15 min)${baseDetail}`
+        title: `Sin dato nuevo diferente al inicial (>=10 min)${baseDetail}`
       };
     }
-    if (waitMin >= 10) {
+    if (waitMin >= 5) {
       return {
         cls: 'led-yellow',
         status: 'yellow',
         diffMin: waitMin,
-        title: `Sin dato nuevo diferente al inicial (${Math.floor(waitMin)} min)${baseDetail}`
+        title: `Sin dato nuevo diferente al inicial (${Math.floor(waitMin)} min · 5-10 min)${baseDetail}`
       };
     }
     return {
@@ -1153,26 +1153,26 @@ function getPlantFreshnessMeta(plantId, eff, nowMs = Date.now()) {
 
   const refMs = rec.lastConfirmedAtMs || (hasValidMod ? modMs : NaN);
   if (!Number.isFinite(refMs) || refMs <= 0) {
-    return { cls: 'led-red', status: 'red', diffMin: null, title: 'Sin actualización registrada hoy (> 15 min)' };
+    return { cls: 'led-red', status: 'red', diffMin: null, title: 'Sin actualización registrada hoy (>= 10 min)' };
   }
   const diffMin = Math.max(0, (nowMs - refMs) / 60000);
   const minsInt = Math.floor(diffMin);
   const timeStr = modStr || new Date(refMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
-  if (diffMin > 15) {
+  if (diffMin >= 10) {
     return {
       cls: 'led-red',
       status: 'red',
       diffMin,
-      title: `Última act.: ${timeStr} (hace ${minsInt} min · >15 min)`
+      title: `Última act.: ${timeStr} (hace ${minsInt} min · >=10 min)`
     };
   }
-  if (diffMin >= 10) {
+  if (diffMin >= 5) {
     return {
       cls: 'led-yellow',
       status: 'yellow',
       diffMin,
-      title: `Última act.: ${timeStr} (hace ${minsInt} min · 10-15 min)`
+      title: `Última act.: ${timeStr} (hace ${minsInt} min · 5-10 min)`
     };
   }
   return {
