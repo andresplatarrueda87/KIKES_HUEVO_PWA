@@ -132,8 +132,11 @@ const State = {
   mqttDataByKey: new Map(),
   recentMqttChanges: new Map(),
   lastMqttTopicLabel: null,
-  mqttState: 'offline'
+  mqttState: 'offline',
+  initialDriveBaselineDone: false
 };
+
+const PLANT_LED_SESSION = new Map();
 
 let gisTokenClient = null;
 let mqttClient = null;
@@ -153,6 +156,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   try {
     await CaucaSQLite.init();
+    absorbPendingPlantBaselines();
     renderAllFromSqlite();
   } catch (err) {
     console.error('Error SQLite:', err);
@@ -497,9 +501,17 @@ function handleIncomingMqttMessage(topic, payloadStr, isRetained = false) {
   if (parts.length === 0) return;
 
   const todayStr = getLocalDateStr();
+  if (parsedPayload.timestampIso) {
+    const msgDateStr = getLocalDateStr(new Date(parsedPayload.timestampIso));
+    if (msgDateStr !== todayStr) {
+      // Mensaje retenido de un día anterior: no cargarlo como producción de hoy
+      return;
+    }
+  }
   const nowIso = new Date().toISOString();
   const effectiveTs = parsedPayload.timestampIso || nowIso;
   let anyChanged = false;
+  const changedPlantIds = new Set();
 
   for (const def of matchingDefs) {
     const prevSlot = State.mqttDataByKey.get(def.key);
@@ -555,9 +567,16 @@ function handleIncomingMqttMessage(topic, payloadStr, isRetained = false) {
     });
     State.lastMqttTopicLabel = def.label;
     anyChanged = true;
+    changedPlantIds.add(def.plantId);
   }
 
   if (anyChanged) {
+    const affectedIds = Array.from(changedPlantIds);
+    if (isRetained) {
+      absorbPendingPlantBaselines(affectedIds);
+    } else {
+      confirmLivePlantUpdates(affectedIds);
+    }
     persistMqttCache();
     flashMqttDot();
     updateMqttStatusLabel();
@@ -805,6 +824,13 @@ async function syncCaucaFromDrive(forceAll = false, targetPlant = null, targetDa
     }
 
     localStorage.setItem(CONFIG.STORAGE_KEYS.LAST_SYNC, new Date().toISOString());
+    const wasInitialDrive = !State.initialDriveBaselineDone;
+    State.initialDriveBaselineDone = true;
+    if (wasInitialDrive) {
+      absorbPendingPlantBaselines();
+    } else if (totalDownloaded > 0) {
+      confirmLivePlantUpdates(plantsToSync.map((p) => p.id));
+    }
     updateUserUI();
     renderAllFromSqlite();
 
@@ -1024,14 +1050,114 @@ function getEffectiveProductionRows(planta = 'TODAS', ini = null, fin = null, ga
   );
 }
 
-function getPlantFreshnessMeta(modifiedTime, nowMs = Date.now()) {
-  const tsMs = modifiedTime ? new Date(modifiedTime).getTime() : NaN;
-  if (!Number.isFinite(tsMs) || tsMs <= 0) {
+function getPlantLedSignature(eff) {
+  const rows = eff?.rows || [];
+  if (rows.length === 0) return `0|${Number(eff?.total || 0)}`;
+  return rows.map((r) => `${r.numero_galpon}:${Number(r.total_produccion || 0)}`).join('|');
+}
+
+function ensurePlantLedSession(plantId, todayStr, eff, nowMs = Date.now()) {
+  let rec = PLANT_LED_SESSION.get(plantId);
+  const sig = getPlantLedSignature(eff);
+  if (!rec || rec.fecha !== todayStr) {
+    rec = {
+      fecha: todayStr,
+      initialSig: sig,
+      lastSeenSig: sig,
+      waitStartedMs: nowMs,
+      confirmedChange: false,
+      lastConfirmedAtMs: null
+    };
+    PLANT_LED_SESSION.set(plantId, rec);
+  }
+  return rec;
+}
+
+function absorbPendingPlantBaselines(plantIds = null) {
+  const todayStr = getLocalDateStr();
+  const nowMs = Date.now();
+  const targets = plantIds || PLANTS.map((p) => p.id);
+  for (const plantId of targets) {
+    const eff = getEffectivePlantDay(plantId, todayStr);
+    const sig = getPlantLedSignature(eff);
+    const rec = ensurePlantLedSession(plantId, todayStr, eff, nowMs);
+    if (!rec.confirmedChange) {
+      rec.initialSig = sig;
+      rec.lastSeenSig = sig;
+    }
+  }
+}
+
+function confirmLivePlantUpdates(plantIds = null) {
+  const todayStr = getLocalDateStr();
+  const nowMs = Date.now();
+  const targets = plantIds || PLANTS.map((p) => p.id);
+  for (const plantId of targets) {
+    const eff = getEffectivePlantDay(plantId, todayStr);
+    const sig = getPlantLedSignature(eff);
+    const rec = ensurePlantLedSession(plantId, todayStr, eff, nowMs);
+    if (!rec.confirmedChange) {
+      if (sig !== rec.initialSig) {
+        rec.confirmedChange = true;
+        rec.lastSeenSig = sig;
+        const tsMs = eff?.latestMod ? new Date(eff.latestMod).getTime() : NaN;
+        rec.lastConfirmedAtMs = (Number.isFinite(tsMs) && tsMs > 0 && tsMs <= nowMs + 60000)
+          ? Math.min(nowMs, tsMs)
+          : nowMs;
+      }
+    } else if (sig !== rec.lastSeenSig) {
+      rec.lastSeenSig = sig;
+      const tsMs = eff?.latestMod ? new Date(eff.latestMod).getTime() : NaN;
+      rec.lastConfirmedAtMs = (Number.isFinite(tsMs) && tsMs > 0 && tsMs <= nowMs + 60000)
+        ? Math.min(nowMs, tsMs)
+        : nowMs;
+    }
+  }
+}
+
+function getPlantFreshnessMeta(plantId, eff, nowMs = Date.now()) {
+  const todayStr = getLocalDateStr();
+  const rec = ensurePlantLedSession(plantId, todayStr, eff, nowMs);
+  const modMs = eff?.latestMod ? new Date(eff.latestMod).getTime() : NaN;
+  const hasValidMod = Number.isFinite(modMs) && modMs > 0;
+  const modStr = hasValidMod
+    ? new Date(modMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : null;
+
+  if (!rec.confirmedChange) {
+    const waitMin = Math.max(0, (nowMs - rec.waitStartedMs) / 60000);
+    const baseDetail = modStr ? ` · Última act.: ${modStr}` : '';
+    if (waitMin > 15) {
+      return {
+        cls: 'led-red',
+        status: 'red',
+        diffMin: waitMin,
+        title: `Sin dato nuevo diferente al inicial (>15 min)${baseDetail}`
+      };
+    }
+    if (waitMin >= 10) {
+      return {
+        cls: 'led-yellow',
+        status: 'yellow',
+        diffMin: waitMin,
+        title: `Sin dato nuevo diferente al inicial (${Math.floor(waitMin)} min)${baseDetail}`
+      };
+    }
+    return {
+      cls: 'led-pending',
+      status: 'pending',
+      diffMin: waitMin,
+      title: `Esperando dato nuevo diferente al inicial${baseDetail}`
+    };
+  }
+
+  const refMs = rec.lastConfirmedAtMs || (hasValidMod ? modMs : NaN);
+  if (!Number.isFinite(refMs) || refMs <= 0) {
     return { cls: 'led-red', status: 'red', diffMin: null, title: 'Sin actualización registrada hoy (> 15 min)' };
   }
-  const diffMin = Math.max(0, (nowMs - tsMs) / 60000);
+  const diffMin = Math.max(0, (nowMs - refMs) / 60000);
   const minsInt = Math.floor(diffMin);
-  const timeStr = new Date(tsMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const timeStr = modStr || new Date(refMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
   if (diffMin > 15) {
     return {
@@ -1053,13 +1179,13 @@ function getPlantFreshnessMeta(modifiedTime, nowMs = Date.now()) {
     cls: 'led-green',
     status: 'green',
     diffMin,
-    title: `Última act.: ${timeStr} (hace ${minsInt} min · al día)`
+    title: `Dato nuevo confirmado: ${timeStr} (hace ${minsInt} min · al día)`
   };
 }
 
 function applyLedElementState(el, freshness) {
   if (!el) return;
-  el.classList.remove('led-green', 'led-yellow', 'led-red');
+  el.classList.remove('led-green', 'led-yellow', 'led-red', 'led-pending');
   el.classList.add(freshness.cls);
   el.title = freshness.title;
 }
@@ -1077,7 +1203,7 @@ function updateAllPlantFreshnessLeds() {
   };
 
   for (const [plantId, info] of Object.entries(byPlant)) {
-    const freshness = getPlantFreshnessMeta(info.eff?.latestMod, nowMs);
+    const freshness = getPlantFreshnessMeta(plantId, info.eff, nowMs);
     applyLedElementState(document.getElementById(info.pillId), freshness);
     document.querySelectorAll(`[data-plant-led="${plantId}"]`).forEach((el) => {
       applyLedElementState(el, freshness);
@@ -1107,9 +1233,9 @@ function updateKpiHeaderToday(todayStr, scope, hoyDisplay, diffHoyDisplay, hoySo
   }
 
   bdEl.innerHTML =
-    `<span class="kpi-plant-part" data-plant="ALKA1"><span class="plant-led led-red" data-plant-led="ALKA1"></span>ALKA 1: ${tAlka1.toLocaleString()}</span> · ` +
-    `<span class="kpi-plant-part" data-plant="ALKA2"><span class="plant-led led-red" data-plant-led="ALKA2"></span>ALKA 2: ${tAlka2.toLocaleString()}</span> · ` +
-    `<span class="kpi-plant-part" data-plant="PALMAS"><span class="plant-led led-red" data-plant-led="PALMAS"></span>PALMAS: ${tPalmas.toLocaleString()}</span>`;
+    `<span class="kpi-plant-part" data-plant="ALKA1"><span class="plant-led led-pending" data-plant-led="ALKA1"></span>ALKA 1: ${tAlka1.toLocaleString()}</span> · ` +
+    `<span class="kpi-plant-part" data-plant="ALKA2"><span class="plant-led led-pending" data-plant-led="ALKA2"></span>ALKA 2: ${tAlka2.toLocaleString()}</span> · ` +
+    `<span class="kpi-plant-part" data-plant="PALMAS"><span class="plant-led led-pending" data-plant-led="PALMAS"></span>PALMAS: ${tPalmas.toLocaleString()}</span>`;
 
   const sameDate = MONITOR_LAST_SHOWN.kpiDate === todayStr;
   if (sameDate) {
@@ -1324,7 +1450,7 @@ function renderMonitorView() {
     const cap = p.maxGalpon - p.minGalpon + 1;
     const isSel = State.selectedPlant === p.id;
     const badge = getSourceBadgeMeta(eff.source);
-    const freshness = isToday ? getPlantFreshnessMeta(eff.latestMod) : null;
+    const freshness = isToday ? getPlantFreshnessMeta(p.id, eff) : null;
     const ledCardHtml = freshness
       ? `<span class="plant-led ${freshness.cls}" data-plant-led="${p.id}" title="${escapeHtml(freshness.title)}"></span>`
       : '';
@@ -1374,7 +1500,7 @@ function renderMonitorView() {
     const totalP = eff.total;
     totalVisible += totalP;
     const badge = getSourceBadgeMeta(eff.source);
-    const secFreshness = isToday ? getPlantFreshnessMeta(eff.latestMod) : null;
+    const secFreshness = isToday ? getPlantFreshnessMeta(p.id, eff) : null;
     const secLedHtml = secFreshness
       ? `<span class="plant-led ${secFreshness.cls}" data-plant-led="${p.id}" title="${escapeHtml(secFreshness.title)}"></span>`
       : '';
@@ -1891,6 +2017,7 @@ function initEventListeners() {
       State.hoySource = btn.dataset.source;
       localStorage.setItem(CONFIG.STORAGE_KEYS.HOY_SOURCE, State.hoySource);
       syncHoySourceButtons();
+      absorbPendingPlantBaselines();
       renderAllFromSqlite();
     });
   });

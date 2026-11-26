@@ -21,7 +21,7 @@
   <script src="lib/xlsx.full.min.js"></script>
   <script src="lib/mqtt.min.js"></script>
 
-  <link rel="stylesheet" href="style.css?v=3">
+  <link rel="stylesheet" href="style.css?v=4">
 </head>
 <body>
 
@@ -113,9 +113,9 @@
   <section class="filter-toolbar">
     <div class="plant-pills" id="plantPills">
       <button class="plant-pill active" data-planta="TODAS">Todo Cauca (38)</button>
-      <button class="plant-pill" data-planta="ALKA1"><span class="plant-led led-red" id="ledPillAlka1" title="Sin actualización hoy"></span><span>ALKA 1 (1–20)</span></button>
-      <button class="plant-pill" data-planta="ALKA2"><span class="plant-led led-red" id="ledPillAlka2" title="Sin actualización hoy"></span><span>ALKA 2 (21–30)</span></button>
-      <button class="plant-pill" data-planta="PALMAS"><span class="plant-led led-red" id="ledPillPalmas" title="Sin actualización hoy"></span><span>ALKA PALMAS (1–8)</span></button>
+      <button class="plant-pill" data-planta="ALKA1"><span class="plant-led led-pending" id="ledPillAlka1" title="Esperando dato nuevo diferente al inicial"></span><span>ALKA 1 (1–20)</span></button>
+      <button class="plant-pill" data-planta="ALKA2"><span class="plant-led led-pending" id="ledPillAlka2" title="Esperando dato nuevo diferente al inicial"></span><span>ALKA 2 (21–30)</span></button>
+      <button class="plant-pill" data-planta="PALMAS"><span class="plant-led led-pending" id="ledPillPalmas" title="Esperando dato nuevo diferente al inicial"></span><span>ALKA PALMAS (1–8)</span></button>
     </div>
 
     <div class="date-range-box">
@@ -397,6 +397,6 @@
   <div id="toastContainer" class="toast-container"></div>
 
   <script src="sqlite-store.js?v=2"></script>
-  <script src="app.js?v=5"></script>
+  <script src="app.js?v=7"></script>
 </body>
 </html>
